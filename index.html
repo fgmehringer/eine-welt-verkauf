@@ -352,6 +352,38 @@
   .change-neg { color: var(--red); }
   .change-set { color: var(--green); }
 
+
+  /* ── CAMERA SCANNER ── */
+  .scanner-target {
+    position: relative;
+    width: 100%;
+    height: 280px;
+    background: #000;
+    overflow: hidden;
+    border-radius: 8px;
+  }
+  .scanner-target video,
+  .scanner-target canvas {
+    position: absolute;
+    inset: 0;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: cover;
+  }
+  .scanner-target canvas.drawingBuffer {
+    pointer-events: none;
+  }
+  .scan-line {
+    position: absolute;
+    left: 12%;
+    right: 12%;
+    top: 50%;
+    height: 2px;
+    background: rgba(255,255,255,0.9);
+    box-shadow: 0 0 0 999px rgba(0,0,0,0.12);
+    z-index: 3;
+  }
+
   /* ── MODALS ── */
   .modal-overlay {
     display: none; position: fixed; inset: 0;
@@ -543,8 +575,8 @@
   <div class="modal">
     <h3>📷 Barcode scannen</h3>
     <p style="font-size:12px; color:var(--text-soft); margin-bottom:12px;">Halte die Kamera über den Barcode.</p>
-    <div style="border-radius:8px; overflow:hidden; background:#000; min-height:180px; display:flex; align-items:center; justify-content:center;">
-      <video id="scanner-video" style="width:100%; display:block;" autoplay playsinline></video>
+    <div id="scanner-target" class="scanner-target">
+      <div class="scan-line"></div>
     </div>
     <p id="scan-status" style="font-size:12px; color:var(--text-soft); text-align:center; margin-top:8px;">Kamera wird gestartet…</p>
     <button class="btn btn-ghost btn-full" style="margin-top:12px;" onclick="stopScan()">Schließen</button>
@@ -671,30 +703,120 @@ function clearScan() {
 
 // ── BARCODE SCANNER ──
 let scanning = false;
+let lastDetectedCode = '';
+let lastDetectedAt = 0;
+
+function cameraErrorText(err) {
+  const name = err?.name || '';
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+    return 'Kamera-Zugriff wurde blockiert. Öffne iPhone Einstellungen → Safari → Kamera bzw. Website-Einstellungen und erlaube die Kamera.';
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    return 'Keine Kamera gefunden.';
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return 'Die Kamera wird gerade von einer anderen App genutzt. Schließe Kamera/Instagram/WhatsApp und versuche es erneut.';
+  }
+  if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+    return 'Die gewünschte Rückkamera konnte nicht gewählt werden. Bitte erneut versuchen.';
+  }
+  if (name === 'SecurityError') {
+    return 'Kamera-Zugriff geht nur über HTTPS. GitHub Pages ist dafür richtig; lokale Dateien oder Vorschau-Fenster funktionieren oft nicht.';
+  }
+  return 'Kamera konnte nicht gestartet werden. Du kannst den Barcode weiterhin manuell eingeben.';
+}
+
+function resetScannerTarget() {
+  const target = document.getElementById('scanner-target');
+  if (target) target.innerHTML = '<div class="scan-line"></div>';
+}
+
 function startScan() {
-  document.getElementById('scanner-overlay').classList.add('open');
-  document.getElementById('scan-status').textContent = 'Kamera wird gestartet…';
+  const overlay = document.getElementById('scanner-overlay');
+  const status = document.getElementById('scan-status');
+  const target = document.getElementById('scanner-target');
+
+  overlay.classList.add('open');
+  status.textContent = 'Kamera wird gestartet…';
+
+  if (!window.Quagga) {
+    status.textContent = 'Scanner-Bibliothek konnte nicht geladen werden. Bitte Internetverbindung prüfen und Seite neu laden.';
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    status.textContent = 'Dieser Browser unterstützt den Kamera-Zugriff nicht. Bitte in Safari über den GitHub-Pages-Link öffnen.';
+    return;
+  }
+  if (!window.isSecureContext) {
+    status.textContent = 'Kamera-Zugriff benötigt HTTPS. Bitte den GitHub-Pages-Link öffnen, nicht die lokale Datei oder ein Vorschau-Popup.';
+    return;
+  }
+
+  stopScan(false);
+  resetScannerTarget();
   scanning = true;
+  lastDetectedCode = '';
+  lastDetectedAt = 0;
+
+  try { Quagga.offDetected(handleDetected); } catch(e) {}
+
   Quagga.init({
-    inputStream: { type: "LiveStream", target: document.getElementById('scanner-video'),
-      constraints: { facingMode: "environment", width: 640, height: 480 } },
-    decoder: { readers: ["ean_reader","ean_8_reader","code_128_reader","upc_reader"] }
+    inputStream: {
+      name: 'Live',
+      type: 'LiveStream',
+      target: target,
+      constraints: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    },
+    locator: {
+      patchSize: 'medium',
+      halfSample: true
+    },
+    locate: true,
+    numOfWorkers: 0,
+    frequency: 10,
+    decoder: {
+      readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader']
+    }
   }, err => {
-    if (err) { document.getElementById('scan-status').textContent = 'Kamera nicht verfügbar – manuell eingeben.'; return; }
-    document.getElementById('scan-status').textContent = 'Kamera bereit – Barcode scannen…';
+    if (err) {
+      console.error(err);
+      scanning = false;
+      status.textContent = cameraErrorText(err);
+      return;
+    }
+    status.textContent = 'Kamera bereit – Barcode mittig und hell ins Bild halten…';
     Quagga.start();
   });
-  Quagga.onDetected(r => {
-    if (!scanning) return;
-    stopScan();
-    document.getElementById('barcode-field').value = r.codeResult.code;
-    lookupBarcode();
-  });
+
+  Quagga.onDetected(handleDetected);
 }
-function stopScan() {
+
+function handleDetected(result) {
+  if (!scanning) return;
+  const code = result?.codeResult?.code;
+  if (!code) return;
+
+  // Schutz gegen mehrfaches Auslösen beim selben Barcode
+  const now = Date.now();
+  if (code === lastDetectedCode && now - lastDetectedAt < 1200) return;
+  lastDetectedCode = code;
+  lastDetectedAt = now;
+
+  stopScan();
+  document.getElementById('barcode-field').value = code;
+  lookupBarcode();
+}
+
+function stopScan(closeOverlay = true) {
   scanning = false;
+  try { Quagga.offDetected(handleDetected); } catch(e) {}
   try { Quagga.stop(); } catch(e) {}
-  document.getElementById('scanner-overlay').classList.remove('open');
+  resetScannerTarget();
+  if (closeOverlay) document.getElementById('scanner-overlay').classList.remove('open');
 }
 
 // ── INVENTORY ──
